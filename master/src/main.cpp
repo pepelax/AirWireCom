@@ -4,10 +4,9 @@
 #include "tusb_config.h"
 #include <Arduino.h>
 #include <HardwareSerial.h>
-#include "USB.h"
 #include "class/cdc/cdc_device.h" // cdc_line_coding_t, tud_cdc_n_get_line_coding
-#include "USBCDC.h"
 #include "tusb.h"                 // TinyUSB core
+#include "usb_cdc.h"
 #include <esp_now.h>
 #include <WiFi.h>
 #include <Preferences.h>
@@ -31,12 +30,10 @@ constexpr uint32_t PING_INTERVAL = 30000;
 constexpr uint32_t OFFLINE_AFTER = 35000;
 constexpr uint32_t BAUD_DEFAULT = 115200;
 
-USBCDC CDC0(0);
-USBCDC CDC1(1);
-USBCDC CDC2(2);
-USBCDC *cdc[3] = {&CDC0, &CDC1, &CDC2};
-
-// The Arduino core for ESP32-S2 expects a global Serial object even when USB CDC is disabled on boot.
+constexpr uint8_t HOST_CDC_PORTS = 2;
+// Two TinyUSB CDC ports (custom stack, see usb_cdc.*)
+extern CdcPort cdcPorts[HOST_CDC_PORTS];
+// Keep Serial on UART0 for debug logs.
 HardwareSerial Serial(0);
 
 struct Slave
@@ -153,6 +150,7 @@ void syncToUI()
 // Получить текущий baud rate для CDC интерфейса (0..2)
 uint32_t getHostBaud(uint8_t itf)
 {
+    if (itf >= HOST_CDC_PORTS) return BAUD_DEFAULT;
     cdc_line_coding_t lc;
     tud_cdc_n_get_line_coding(itf, &lc);
     return (lc.bit_rate > 0) ? lc.bit_rate : BAUD_DEFAULT;
@@ -179,7 +177,7 @@ void checkLineCoding()
 {
     static uint32_t lastBaud[3] = {0, 0, 0};
 
-    for (int i = 0; i < 3; i++)
+    for (int i = 0; i < HOST_CDC_PORTS; i++)
     {
         if (!slaves[i].active)
             continue;
@@ -369,8 +367,8 @@ void onReceive(const uint8_t *mac_addr, const uint8_t *data, int len)
 
     case PKT_DATA:
     {
-        if (knownIdx >= 0 && len > 1)
-            cdc[knownIdx]->write(data + 1, len - 1);
+        if (knownIdx >= 0 && knownIdx < HOST_CDC_PORTS && len > 1)
+            cdcPorts[knownIdx].write(data + 1, len - 1);
         break;
     }
 
@@ -398,6 +396,9 @@ void setup()
 {
     Serial.begin(115200);
 
+    // Initialize TinyUSB with two CDC ports (custom descriptors).
+    usb_init();
+
     ui.labels.load();
 
     // char d[3][16];
@@ -406,17 +407,6 @@ void setup()
     // CDC0.setStringDescriptor(d[0]);
     // CDC1.setStringDescriptor(d[1]);
     // CDC2.setStringDescriptor(d[2]);
-
-    CDC0.begin(115200);
-    CDC0.setTimeout(10);
-    CDC1.begin(115200);
-    CDC1.setTimeout(10);
-    CDC2.begin(115200);
-    CDC2.setTimeout(10);
-
-    USB.productName("AirWireCom");
-    USB.manufacturerName("ESP32-S2");
-    USB.begin();
 
     // Serial.printf("[Master] CDC: \"%s\" \"%s\" \"%s\"\n", d[0], d[1], d[2]);
 
@@ -473,12 +463,14 @@ void loop()
     {
         if (!slaves[i].active)
             continue;
-        int avail = cdc[i]->available();
+        if (i >= HOST_CDC_PORTS)
+            continue;
+        int avail = cdcPorts[i].available();
         if (avail <= 0)
             continue;
         uint8_t buf[250];
         buf[0] = PKT_DATA;
-        int n = cdc[i]->readBytes(buf + 1, min(avail, 249));
+        int n = cdcPorts[i].readBytes(buf + 1, min(avail, 249));
         if (n > 0)
             esp_now_send(slaves[i].mac, buf, n + 1);
     }

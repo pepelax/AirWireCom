@@ -42,12 +42,12 @@
 #ifdef CFG_TUD_CDC
 #undef CFG_TUD_CDC
 #endif
-#define CFG_TUD_CDC             2   // expose two CDC interfaces
+#define CFG_TUD_CDC             1   // expose three CDC interfaces
 
 #ifdef CFG_TUD_MSC
 #undef CFG_TUD_MSC
 #endif
-#define CFG_TUD_MSC             1   // keep MSC enabled to satisfy core build
+#define CFG_TUD_MSC             1   // keep MSC enabled (USBMSC.cpp is always built)
 
 #ifdef CFG_TUD_HID
 #undef CFG_TUD_HID
