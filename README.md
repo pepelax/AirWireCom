@@ -17,6 +17,7 @@
 - [Pinout](#pinout)
 - [Building and Flashing](#building-and-flashing)
 - [Pairing Procedure](#pairing-procedure)
+- [Logic-Level Safety](#logic-level-safety)
 - [Protocol Specification](#protocol-specification)
 - [State Machine](#state-machine)
 - [LED Indicators](#led-indicators)
@@ -106,6 +107,14 @@ The master reads the host's baud rate (via USB CDC line coding on S2/S3, or RX m
 - **2x** Buttons (momentary, typically built-in BOOT/FLASH buttons)
 - **2x** LEDs (or use built-in LEDs)
 - Jumper wires (if external components needed)
+
+---
+
+## Logic-Level Safety
+
+- All ESP32/ESP8266 boards use 3.3V UART logic; popular Arduino/ATmega boards expose 5V TTL. Use a bidirectional level shifter (or resistor divider on ESP RX plus MOSFET/IC shifter on TX) when wiring UART between them.
+- Do **not** connect an ESP's USB port directly to another microcontroller's USB port expecting a UART signal; USB is a differential protocol, not TTL UART, and the ports cannot talk to each other without host/device stacks.
+- If the 5V side cannot be level-shifted, run the 5V board at 3.3V if supported, or choose a 3.3V-native board to avoid damaging the ESP.
 
 ---
 
