@@ -1,27 +1,27 @@
 /*
- * AirWireCom — единая прошивка для мастера и слейва
+ * AirWireCom — unified firmware for master and slave
  * ESP32-S2 / ESP32 / ESP8266
  *
- * Роль определяется при паринге:
- *   Нажал кнопку первым (инициировал) → SLAVE
- *   Принял запрос (подтвердил)         → MASTER
+ * Role is determined during pairing:
+ *   Pressed button first (initiated) → SLAVE
+ *   Accepted request (confirmed)     → MASTER
  *
- * Кнопка (EncButton):
- *   Старт без пары           — сразу отправляем PKT_PAIR
- *   click() в ST_CONFIRM     — подтвердить, стать мастером
- *   hold()                   — сброс пары / отклонить запрос
+ * Button (EncButton):
+ *   Start without pair       — immediately send PKT_PAIR
+ *   click() in ST_CONFIRM    — confirm, become master
+ *   hold()                   — reset pair / reject request
  *
  * LED:
- *   SEEKING  — быстрое мигание
- *   CONFIRM  — двойное мигание
- *   Онлайн   — горит постоянно
- *   Офлайн   — редкое моргание
+ *   SEEKING  — fast blinking
+ *   CONFIRM  — double blinking
+ *   Online   — steady on
+ *   Offline  — rare blinking
  */
 
 #include <Arduino.h>
 #include <EncButton.h>
 
-// ── Платформозависимые включения ──────────────────────────────
+// ── Platform-dependent includes ──────────────────────────────
 #ifdef ESP8266
 #include <ESP8266WiFi.h>
 extern "C"
@@ -42,7 +42,7 @@ extern "C"
 #include "tusb.h"                 // TinyUSB core
 #include "class/cdc/cdc_device.h" // cdc_line_coding_t, tud_cdc_n_get_line_coding
 #define HAS_NATIVE_USB 1
-// Заглушки DFU — libarduino_tinyusb.a требует эти символы
+// DFU stubs — libarduino_tinyusb.a requires these symbols
 extern "C"
 {
     uint32_t tud_dfu_get_timeout_cb(uint8_t, uint8_t) { return 0; }
@@ -62,7 +62,7 @@ extern "C"
 #endif
 
 // ═════════════════════════════════════════════════════════════
-//  ОТЛАДКА — раскомментируй для вывода диагностики
+//  DEBUG — uncomment to enable diagnostic output
 // ═════════════════════════════════════════════════════════════
 // #define DEBUG
 
@@ -77,72 +77,72 @@ extern "C"
 #endif
 
 // ═════════════════════════════════════════════════════════════
-//  НАСТРОЙКИ — все параметры собраны здесь
+//  SETTINGS — all parameters are collected here
 // ═════════════════════════════════════════════════════════════
 
-// ── Пины ──────────────────────────────────────────────────────
+// ── Pins ──────────────────────────────────────────────────────
 #ifdef PLATFORM_ESP8266
-constexpr uint8_t PIN_BUTTON = 0;  // GPIO0 = FLASH кнопка
-constexpr uint8_t PIN_LED = 2;     // встроенный LED (инвертирован)
-constexpr uint8_t PIN_RX_MON = 14; // мониторинг RX для автодетекта baud
+constexpr uint8_t PIN_BUTTON = 0;  // GPIO0 = FLASH button
+constexpr uint8_t PIN_LED = 2;     // built-in LED (inverted)
+constexpr uint8_t PIN_RX_MON = 14; // RX monitoring for auto-baud detection
 #else
-constexpr uint8_t PIN_BUTTON = 0; // BOOT кнопка
-constexpr uint8_t PIN_LED = 15;   // поправь под плату
-constexpr uint8_t PIN_RX_MON = 4; // мониторинг RX (не нужен на S2/S3)
-// LEDC (PWM) для плавного управления LED
+constexpr uint8_t PIN_BUTTON = 0; // BOOT button
+constexpr uint8_t PIN_LED = 15;   // adjust for your board
+constexpr uint8_t PIN_RX_MON = 4; // RX monitoring (not needed on S2/S3)
+// LEDC (PWM) for smooth LED control
 constexpr uint8_t LEDC_CH = 0;
-constexpr uint32_t LEDC_FREQ = 5000; // Гц
-constexpr uint8_t LEDC_RES = 8;      // бит → диапазон 0..255
-// UART пины для отладки на S2/S3 (SerialUSB занят USB CDC)
+constexpr uint32_t LEDC_FREQ = 5000; // Hz
+constexpr uint8_t LEDC_RES = 8;      // bits → range 0..255
+// UART pins for debugging on S2/S3 (SerialUSB is occupied by USB CDC)
 constexpr uint8_t PIN_DEBUG_TX = 17;
 constexpr uint8_t PIN_DEBUG_RX = 18;
 #endif
 
-// ── Протокол ──────────────────────────────────────────────────
+// ── Protocol ──────────────────────────────────────────────────
 constexpr uint8_t PKT_DATA = 0x01;
-constexpr uint8_t PKT_PAIR = 0x02;  // broadcast: ищу пару
-constexpr uint8_t PKT_CLAIM = 0x03; // [CLAIM, myMac×6] — стал мастером
-constexpr uint8_t PKT_ACK = 0x04;   // [ACK, baud×4] — подтверждение + baud
+constexpr uint8_t PKT_PAIR = 0x02;  // broadcast: seeking pair
+constexpr uint8_t PKT_CLAIM = 0x03; // [CLAIM, myMac×6] — became master
+constexpr uint8_t PKT_ACK = 0x04;   // [ACK, baud×4] — confirmation + baud
 constexpr uint8_t PKT_UNPAIR = 0x05;
 constexpr uint8_t PKT_BAUD = 0x06; // [BAUD, baud×4]
 constexpr uint8_t PKT_PING = 0x07;
 constexpr uint8_t PKT_PONG = 0x08;
 
-// Размеры пакетов (для читаемости условий len >= N)
-constexpr uint8_t PKT_CLAIM_LEN = 7; // тип + MAC(6)
-constexpr uint8_t PKT_ACK_LEN = 5;   // тип + baud(4)
-constexpr uint8_t PKT_BAUD_LEN = 5;  // тип + baud(4)
+// Packet sizes (for readability of len >= N conditions)
+constexpr uint8_t PKT_CLAIM_LEN = 7; // type + MAC(6)
+constexpr uint8_t PKT_ACK_LEN = 5;   // type + baud(4)
+constexpr uint8_t PKT_BAUD_LEN = 5;  // type + baud(4)
 
-// ── Таймауты и интервалы (мс) ─────────────────────────────────
-constexpr uint32_t SEEK_INTERVAL = 2000;  // повтор PKT_PAIR каждые N мс
-constexpr uint32_t CONFIRM_TTL = 15000;   // ждать подтверждения N мс
-constexpr uint32_t PING_INTERVAL = 30000; // heartbeat каждые N мс
-constexpr uint32_t OFFLINE_AFTER = 35000; // нет пакетов N мс → офлайн
-constexpr uint32_t UNPAIR_DELAY_MS = 80;  // пауза после отправки PKT_UNPAIR
+// ── Timeouts and intervals (ms) ─────────────────────────────────
+constexpr uint32_t SEEK_INTERVAL = 2000;  // repeat PKT_PAIR every N ms
+constexpr uint32_t CONFIRM_TTL = 15000;   // wait for confirmation for N ms
+constexpr uint32_t PING_INTERVAL = 30000; // heartbeat every N ms
+constexpr uint32_t OFFLINE_AFTER = 35000; // no packets for N ms → offline
+constexpr uint32_t UNPAIR_DELAY_MS = 80;  // pause after sending PKT_UNPAIR
 
-// ── Кнопка ────────────────────────────────────────────────────
-constexpr uint16_t BTN_HOLD_MS = 3000; // порог долгого нажатия
+// ── Button ────────────────────────────────────────────────────
+constexpr uint16_t BTN_HOLD_MS = 3000; // long press threshold
 
-// ── LED — тайминги паттернов (мс) ─────────────────────────────
-constexpr uint32_t LED_SEEK_PERIOD = 2000;    // период breathing (плавное нарастание/затухание)
-constexpr uint32_t LED_CONFIRM_PERIOD = 1200; // период двойного мигания
-constexpr uint32_t LED_CONFIRM_PULSE1 = 120;  // длина первого импульса
-constexpr uint32_t LED_CONFIRM_GAP = 250;     // пауза между импульсами
-constexpr uint32_t LED_CONFIRM_PULSE2 = 370;  // конец второго импульса
-constexpr uint32_t LED_OFFLINE_PERIOD = 400;  // период частого мигания (быстрое)
-constexpr uint32_t LED_OFFLINE_PULSE = 200;   // длина вспышки
+// ── LED — pattern timings (ms) ─────────────────────────────
+constexpr uint32_t LED_SEEK_PERIOD = 2000;    // breathing period (smooth fade in/out)
+constexpr uint32_t LED_CONFIRM_PERIOD = 1200; // double blink period
+constexpr uint32_t LED_CONFIRM_PULSE1 = 120;  // first pulse duration
+constexpr uint32_t LED_CONFIRM_GAP = 250;     // gap between pulses
+constexpr uint32_t LED_CONFIRM_PULSE2 = 370;  // end of second pulse
+constexpr uint32_t LED_OFFLINE_PERIOD = 400;  // fast blinking period (offline)
+constexpr uint32_t LED_OFFLINE_PULSE = 200;   // flash duration
 
-// ── LED — яркость ─────────────────────────────────────────────
-constexpr uint8_t LED_FULL = 255; // максимальная яркость (8 бит)
+// ── LED — brightness ─────────────────────────────────────────────
+constexpr uint8_t LED_FULL = 255; // maximum brightness (8-bit)
 constexpr uint8_t LED_OFF = 0;
 #ifdef PLATFORM_ESP8266
 constexpr uint16_t LED_PWM_MAX = 1023; // ESP8266 analogWrite 0..1023
-constexpr uint8_t LED_PWM_SCALE = 4;   // перевод 8→10 бит (* 4)
+constexpr uint8_t LED_PWM_SCALE = 4;   // 8→10 bit conversion (* 4)
 #endif
 
 // ── Baud rate ─────────────────────────────────────────────────
 constexpr uint32_t BAUD_DEFAULT = 115200;
-constexpr uint32_t BAUD_DETECT_MIN = 5; // минимальный импульс мкс (защита от шума)
+constexpr uint32_t BAUD_DETECT_MIN = 5; // minimum pulse in us (noise protection)
 constexpr uint32_t MICROS_PER_SEC = 1000000UL;
 
 const uint32_t STD_BAUDS[] = {
@@ -151,23 +151,23 @@ const uint32_t STD_BAUDS[] = {
 // ── Flash ─────────────────────────────────────────────────────
 #ifdef PLATFORM_ESP8266
 constexpr uint8_t EEPROM_SIZE = 16;
-constexpr uint8_t EEPROM_MAGIC = 0xAB;  // маркер валидных данных
-constexpr uint8_t EEPROM_MAGIC_OFF = 0; // смещение маркера
-constexpr uint8_t EEPROM_ROLE_OFF = 1;  // смещение роли ('M'/'S')
-constexpr uint8_t EEPROM_MAC_OFF = 2;   // смещение MAC (6 байт)
-constexpr uint8_t EEPROM_BAUD_OFF = 8;  // смещение baud (4 байта)
-constexpr uint8_t EEPROM_EMPTY = 0x00;  // признак сброса
+constexpr uint8_t EEPROM_MAGIC = 0xAB;  // valid data marker
+constexpr uint8_t EEPROM_MAGIC_OFF = 0; // marker offset
+constexpr uint8_t EEPROM_ROLE_OFF = 1;  // role offset ('M'/'S')
+constexpr uint8_t EEPROM_MAC_OFF = 2;   // MAC offset (6 bytes)
+constexpr uint8_t EEPROM_BAUD_OFF = 8;  // baud offset (4 bytes)
+constexpr uint8_t EEPROM_EMPTY = 0x00;  // reset indicator
 #endif
 
 // ── ESP-NOW ───────────────────────────────────────────────────
 constexpr uint8_t ESPNOW_CHANNEL = 0;
 constexpr uint8_t MAC_LEN = 6;
-constexpr uint8_t DATA_MAX = 249;               // макс. данных в одном пакете
-constexpr uint8_t DATA_BUF_SIZE = DATA_MAX + 1; // +1 для байта типа пакета
+constexpr uint8_t DATA_MAX = 249;               // max data in one packet
+constexpr uint8_t DATA_BUF_SIZE = DATA_MAX + 1; // +1 for packet type byte
 
 // ═════════════════════════════════════════════════════════════
 
-// ── Состояния ─────────────────────────────────────────────────
+// ── States ─────────────────────────────────────────────────
 enum State
 {
     ST_SEEKING,
@@ -184,7 +184,7 @@ uint8_t candidateMac[MAC_LEN] = {};
 bool hasCandidate = false;
 uint32_t confirmStart = 0;
 uint32_t lastSeek = 0;
-volatile bool waitingForRelease = false; // требуется отпускание кнопки в ST_CONFIRM
+volatile bool waitingForRelease = false; // button release required in ST_CONFIRM
 
 const uint8_t BROADCAST[MAC_LEN] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
@@ -305,17 +305,17 @@ void updateLed()
 
     case ST_SEEKING:
     {
-        // breathing: плавное нарастание и затухание
+        // breathing: smooth fade in and fade out
         uint32_t t = now % LED_SEEK_PERIOD;
         uint8_t brightness;
         if (t < LED_SEEK_PERIOD / 2)
         {
-            // нарастание: 0 -> LED_FULL
+            // fade in: 0 -> LED_FULL
             brightness = (uint8_t)((t * 2 * LED_FULL) / LED_SEEK_PERIOD);
         }
         else
         {
-            // затухание: LED_FULL -> 0
+            // fade out: LED_FULL -> 0
             brightness = (uint8_t)(((LED_SEEK_PERIOD - t) * 2 * LED_FULL) / LED_SEEK_PERIOD);
         }
         ledSet(brightness);
@@ -335,11 +335,11 @@ void updateLed()
     case ST_PAIRED_SLAVE:
         if (millis() - lastContact < OFFLINE_AFTER)
         {
-            ledSet(LED_FULL); // горит постоянно
+            ledSet(LED_FULL); // steady on
         }
         else
         {
-            // частое мигание (offline)
+            // fast blinking (offline)
             ledSet((now % LED_OFFLINE_PERIOD) < LED_OFFLINE_PULSE ? LED_FULL : LED_OFF);
         }
         break;
@@ -474,14 +474,14 @@ void becomeMaster()
     uint32_t baud = getHostBaud();
     currentBaud = baud;
 
-    // PKT_CLAIM broadcast: уведомить всех что этот слейв занят
+    // PKT_CLAIM broadcast: notify everyone that this slave is taken
     uint8_t claim[PKT_CLAIM_LEN];
     claim[0] = PKT_CLAIM;
     memcpy(claim + 1, peerMac, MAC_LEN);
     espnowAddPeer(BROADCAST);
     esp_now_send((uint8_t *)BROADCAST, claim, PKT_CLAIM_LEN);
 
-    // PKT_ACK → слейву: подтверждение + baud
+    // PKT_ACK → slave: confirmation + baud
     uint8_t ack[PKT_ACK_LEN];
     ack[0] = PKT_ACK;
     packU32(ack + 1, baud);
@@ -539,7 +539,7 @@ void onReceive(const uint8_t *mac, const uint8_t *data, int len)
     if (len < 1)
         return;
 
-    // Любой пакет от партнёра обновляет lastContact
+    // Any packet from partner updates lastContact
     if ((state == ST_PAIRED_MASTER || state == ST_PAIRED_SLAVE) && memcmp(mac, peerMac, MAC_LEN) == 0)
         lastContact = millis();
 
@@ -563,7 +563,7 @@ void onReceive(const uint8_t *mac, const uint8_t *data, int len)
             break;
         if (state == ST_CONFIRM)
         {
-            // Если наш кандидат занят другим мастером — сброс
+            // If our candidate is taken by another master — reset
             if (memcmp(data + 1, candidateMac, MAC_LEN) == 0)
             {
                 state = ST_SEEKING;
@@ -601,8 +601,8 @@ void onReceive(const uint8_t *mac, const uint8_t *data, int len)
     }
 
     case PKT_PONG:
-        break; // lastContact обновлён выше
-
+        break; // lastContact updated above
+    
     case PKT_DATA:
         if (len > 1)
         {
@@ -622,7 +622,7 @@ void onReceive(const uint8_t *mac, const uint8_t *data, int len)
 }
 
 // ─────────────────────────────────────────────────────────────
-//  Периодические задачи
+//  Periodic tasks
 // ─────────────────────────────────────────────────────────────
 
 void seekLoop()
@@ -695,21 +695,21 @@ void dataLoop()
 }
 
 // ─────────────────────────────────────────────────────────────
-//  Кнопка
+//  Button
 // ─────────────────────────────────────────────────────────────
 
 void handleButton()
 {
     btn.tick();
 
-    // В ST_CONFIRM игнорируем действия пока кнопка не отпущена
+    // In ST_CONFIRM ignore actions until button is released
     if (waitingForRelease)
     {
         if (btn.release())
         {
             waitingForRelease = false;
         }
-        return; // Пропускаем обработку в этом тике, пока не отпустили
+        return; // Skip processing in this tick until released
     }
 
     if (btn.hold())
@@ -723,7 +723,7 @@ void handleButton()
         }
         else
         {
-            waitingForRelease = true; // требуем отпускания кнопки перед действием
+            waitingForRelease = true; // require button release before action
             resetPair();
         }
         return;
@@ -746,7 +746,7 @@ void setup()
 {
 #ifdef PLATFORM_ESP8266
     pinMode(PIN_LED, OUTPUT);
-    analogWrite(PIN_LED, LED_PWM_MAX); // выключен (инверт.)
+    analogWrite(PIN_LED, LED_PWM_MAX); // off (inverted)
 #else
     ledcSetup(LEDC_CH, LEDC_FREQ, LEDC_RES);
     ledcAttachPin(PIN_LED, LEDC_CH);
@@ -790,7 +790,7 @@ void setup()
     {
         espnowAddPeer(peerMac);
         lastContact = millis();
-        // Сразу отправляем PING для восстановления связи
+        // Immediately send PING to restore connection
         uint8_t pkt[1] = {PKT_PING};
         esp_now_send(peerMac, pkt, sizeof(pkt));
         DBG_PRINTF("[AWC] Restored as %s  peer=%02X:%02X:%02X:%02X:%02X:%02X\n",
