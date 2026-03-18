@@ -108,30 +108,6 @@ public:
         _instance = this;
     }
 
-    void begin(Button* btn, uint8_t ledPin) {
-        _btn    = btn;
-        _ledPin = ledPin;
-        pinMode(_ledPin, OUTPUT);
-
-        Wire.begin(OLED_SDA, OLED_SCL);
-        Wire.setClock(400000L);
-        Wire.beginTransmission(OLED_ADDR);
-        _hasDisplay = (Wire.endTransmission() == 0);
-
-        if (_hasDisplay) {
-            oled.init(OLED_ADDR);
-            oled.flipV(true);  // поворот на 180° — убрать если не нужен
-            oled.clear();
-            _splash();
-            _setupMenuMain();
-            _setupMenuPair();
-            _active = &menuMain;
-            menuMain.refresh();
-        }
-
-        _instance = this;
-    }
-
     void update() {
         if (!_btn) return;
         ButtonEvent e = _btn->update();

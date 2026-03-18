@@ -1,11 +1,13 @@
 // main.cpp — ESP32-S2, AirWireCom (master)
 // PlatformIO: см. platformio.ini
 
+#include "tusb_config.h"
 #include <Arduino.h>
+#include <HardwareSerial.h>
 #include "USB.h"
+#include "class/cdc/cdc_device.h" // cdc_line_coding_t, tud_cdc_n_get_line_coding
 #include "USBCDC.h"
 #include "tusb.h"                 // TinyUSB core
-#include "class/cdc/cdc_device.h" // cdc_line_coding_t, tud_cdc_n_get_line_coding
 #include <esp_now.h>
 #include <WiFi.h>
 #include <Preferences.h>
@@ -33,6 +35,9 @@ USBCDC CDC0(0);
 USBCDC CDC1(1);
 USBCDC CDC2(2);
 USBCDC *cdc[3] = {&CDC0, &CDC1, &CDC2};
+
+// The Arduino core for ESP32-S2 expects a global Serial object even when USB CDC is disabled on boot.
+HardwareSerial Serial(0);
 
 struct Slave
 {
@@ -169,7 +174,7 @@ void sendBaudToSlave(uint8_t slot, uint32_t baud)
 #endif
 }
 
-// Проверять изменение line coding каждый тик
+// Check line coding change every tick, if host changes it while connected
 void checkLineCoding()
 {
     static uint32_t lastBaud[3] = {0, 0, 0};
@@ -223,47 +228,38 @@ void cbClaimSent()
     esp_now_send(BROADCAST, pkt, 7);
 }
 
-void cbConfirmPair(uint8_t slot, uint8_t labelIdx)
+void cbConfirmPair(uint8_t slot)
 {
-    const uint8_t *mac = ui.pendingMac;
-    if (findSlave(mac) >= 0)
-        return;
-    if (slot >= 3 || slaves[slot].active)
-    {
-        int s = freeSlot();
-        if (s < 0)
-            return;
-        slot = s;
+    const uint8_t* mac = ui.pendingMac;
+    if (findSlave(mac) >= 0) return;
+    if (slot >= 3 || slaves[slot].active) {
+        int s = freeSlot(); if (s < 0) return; slot = s;
     }
-
+ 
     espnowAddPeer(mac);
     memcpy(slaves[slot].mac, mac, 6);
-    slaves[slot].active = true;
+    slaves[slot].active   = true;
     slaves[slot].lastSeen = millis();
     savePairs();
-    ui.labels.saveLabel(slot, labelIdx);
-
-    // Берём текущий baud с хоста (или дефолт если порт закрыт)
+ 
+    // Бaud с хоста — если порт ещё не открыт, будет дефолт 115200
     uint32_t baud = getHostBaud(slot);
     ui.slotBaud[slot] = baud;
-
+ 
     uint8_t ack[7];
     ack[0] = PKT_ACK;
     ack[1] = slot;
     packU32(ack + 2, baud);
     esp_now_send(mac, ack, 7);
-
+ 
     syncToUI();
     ui.showSuccess(slot);
-
-    if (ui.hasDisplay())
-        digitalWrite(PIN_LED, LOW);
-
+ 
 #ifdef DEBUG
     Serial.printf("[Master] Paired with %02X:%02X:%02X:%02X:%02X:%02X\n",
                   mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-    Serial.printf("[Master] Paired slot %d  label=%s  baud=%lu\n",
-                  slot, PRESET_LABELS[labelIdx], (unsigned long)baud);
+    Serial.printf("[Master] Paired slot %d baud=%lu\n",
+                  slot, (unsigned long)baud);
 #endif
 }
 
@@ -305,7 +301,7 @@ void cbLabelChanged(uint8_t slot, uint8_t idx)
 {
     ui.labels.saveLabel(slot, idx);
 #ifdef DEBUG
-    Serial.printf("[Master] Slot %d label → \"%s\" (reboot for Win name)\n",
+    Serial.printf("[Master] Slot %d label → \"%s\"\n",
                   slot, PRESET_LABELS[idx]);
     Serial.printf("[Master] Slot %d baud → %lu\n",
                   slot, (unsigned long)ui.slotBaud[slot]);
@@ -404,9 +400,9 @@ void setup()
 
     ui.labels.load();
 
-    char d[3][16];
-    for (int i = 0; i < 3; i++)
-        ui.labels.descriptor(i, d[i], sizeof(d[i]));
+    // char d[3][16];
+    // for (int i = 0; i < 3; i++)
+    //     ui.labels.descriptor(i, d[i], sizeof(d[i]));
     // CDC0.setStringDescriptor(d[0]);
     // CDC1.setStringDescriptor(d[1]);
     // CDC2.setStringDescriptor(d[2]);
@@ -422,14 +418,16 @@ void setup()
     USB.manufacturerName("ESP32-S2");
     USB.begin();
 
-    Serial.printf("[Master] CDC: \"%s\" \"%s\" \"%s\"\n", d[0], d[1], d[2]);
+    // Serial.printf("[Master] CDC: \"%s\" \"%s\" \"%s\"\n", d[0], d[1], d[2]);
 
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
     espnowAddPeer(BROADCAST);
     if (esp_now_init() != ESP_OK)
     {
+#ifdef DEBUG
         Serial.println("[Master] ESP-NOW init FAILED");
+#endif
         return;
     }
     esp_now_register_recv_cb(onReceive);
@@ -445,9 +443,11 @@ void setup()
     syncToUI();
     ui.begin(&btn, PIN_LED);
 
+#ifdef DEBUG
     Serial.printf("[Master] MAC: %s\n", WiFi.macAddress().c_str());
     Serial.printf("[Master] Display: %s\n", ui.hasDisplay() ? "YES" : "NO (headless mode)");
     Serial.println("[Master] Ready.");
+#endif
 }
 
 // ─────────────────────────────────────────────────────────────
