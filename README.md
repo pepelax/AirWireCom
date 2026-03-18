@@ -18,6 +18,7 @@
 - [Building and Flashing](#building-and-flashing)
 - [Pairing Procedure](#pairing-procedure)
 - [Logic-Level Safety](#logic-level-safety)
+- [ESP32-C3 Notes](#esp32-c3-notes)
 - [Protocol Specification](#protocol-specification)
 - [State Machine](#state-machine)
 - [LED Indicators](#led-indicators)
@@ -156,6 +157,13 @@ These require external CH340/CP2102 USB-UART chips. The firmware cannot read the
 | **Budget** | ESP32-S2 Mini | ESP8266 NodeMCU |
 | **Performance** | ESP32-S3 | ESP32 DevKit |
 | **Unified** | ESP32-S2 Mini | ESP32-S2 Mini |
+
+### ESP32-C3 Notes
+
+- ESP32-C3 exposes a ROM USB ACM interface (for flashing/console) that is not the same TinyUSB CDC used on S2/S3. The firmware cannot act as a standard USB-CDC device for baud sensing.
+- The USB peripheral is not internally wired to a UART block; there is no path to read host line coding, so automatic baud detection is impossible.
+- You may use C3 as a slave, or as a master with a fixed UART baud (defaults to 115200 unless you hardcode another value).
+- For masters that must mirror the host-selected baud, use ESP32-S2 or ESP32-S3 instead.
 
 ---
 
